@@ -1,0 +1,5 @@
+# dados descarregados pelo extrair.ps1: refazem-se a qualquer altura
+# (as áreas atuais são dados internos da CML; as ruas têm ~20 MB)
+dados/ruas.js
+dados/areas-atuais.js
+*.geojson

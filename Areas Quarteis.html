@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="pt-PT">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Áreas dos Quartéis</title>
+<link rel="stylesheet" href="leaflet.css">
+<style>
+  :root { --borda: #d0d4da; --suave: #5f6b7a; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; font: 13px/1.4 system-ui, "Segoe UI", sans-serif; color: #1d2329; background: #fff; }
+  #painel { width: 450px; flex: none; overflow-y: auto; padding: 12px 14px; border-right: 1px solid var(--borda); }
+  #mapa { flex: 1; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  h2 { font-size: 13px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--suave); }
+  label { display: block; margin: 3px 0; cursor: pointer; }
+  #estado { margin: 0; color: var(--suave); white-space: pre-line; }
+  #estado.erro { color: #b3261e; }
+  button { font: inherit; padding: 5px 10px; margin: 6px 6px 0 0; cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 3px 4px; border-bottom: 1px solid #eceff2; text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; }
+  th { font-weight: 600; color: var(--suave); font-size: 12px; white-space: normal; vertical-align: bottom; }
+  #tabela td:first-child { white-space: nowrap; }
+  tr.total td { font-weight: 600; border-top: 2px solid var(--borda); }
+  .cor { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .melhor { color: #1b7a32; } .pior { color: #b3261e; }
+  #velocidades input { width: 52px; font: inherit; text-align: right; }
+  .nota { color: var(--suave); font-size: 12px; }
+  .grelha { image-rendering: pixelated; }
+  .rotulo { font-weight: 600; }
+  .popup td { padding: 1px 6px 1px 0; border: 0; }
+  .popup tr { cursor: pointer; }
+  .popup tr:hover td { background: #f1f3f5; }
+  .popup tr.visto td { font-weight: 600; }
+  .popup .km { color: var(--suave); }
+  label.falta { color: #9aa3ad; cursor: default; }
+  label.falta::after { content: " (faltam as áreas do goMAP)"; font-style: italic; }
+  .titulo { font-weight: 600; margin-bottom: 4px; max-width: 320px; }
+</style>
+</head>
+<body>
+<aside id="painel">
+  <h1>Áreas dos quartéis</h1>
+  <p id="estado">A carregar…</p>
+
+  <h2>Mapa</h2>
+  <label><input type="radio" name="fundo" value="proposta" checked> Proposta por tempo de percurso</label>
+  <label><input type="radio" name="fundo" value="mudancas"> Só o que muda de quartel</label>
+  <label><input type="radio" name="fundo" value="nada"> Sem cor</label>
+  <label><input type="checkbox" id="verAtuais" checked> Contorno das áreas atuais</label>
+  <label><input type="checkbox" id="verRuas"> Ruas pela cor do quartel mais rápido</label>
+
+  <h2>Por quartel</h2>
+  <table id="tabela"></table>
+  <p class="nota">Tempos do quartel até cada quadrado de <span id="celula"></span> m da área: média e o tempo
+    a que chegam 95 % dos quadrados (P95). Atual = área de hoje; proposta = o quartel que chega mais depressa.</p>
+
+  <h2>Áreas atuais</h2>
+  <p class="nota" id="areasData"></p>
+  <button id="atualizarAreas">⬇ Atualizar áreas do goMAP</button>
+
+  <h2>Cálculo</h2>
+  <label><input type="checkbox" id="sentidos" checked> Respeitar os sentidos únicos</label>
+  <p class="nota">Velocidade média (km/h) de um carro de socorro em cada tipo de via. Se o OSM tiver uma velocidade máxima mais baixa, fica essa.</p>
+  <table id="velocidades"></table>
+  <button id="recalcular">Recalcular</button>
+  <button id="exportar">Exportar proposta (GeoJSON)</button>
+
+  <p class="nota">Clica no mapa para ver quanto tempo cada quartel demora a chegar a esse ponto.<br>
+    Ruas: © colaboradores do OpenStreetMap (ODbL). Mapa base: CM Lisboa.</p>
+</aside>
+<div id="mapa"></div>
+
+<script src="leaflet.js"></script>
+<script src="dados/quarteis.js"></script>
+<script src="dados/ruas.js"></script>
+<script src="dados/areas-atuais.js"></script>
+<script>
+"use strict";
+
+// ---------- regras do cálculo ----------
+
+// velocidade média (km/h) de um carro de socorro em cada tipo de via; as ligações (*_link) contam como a via
+const VELOCIDADES = { motorway: 80, trunk: 70, primary: 50, secondary: 45, tertiary: 40, unclassified: 30, residential: 30, road: 30, living_street: 15, service: 15 };
+const NOMES_VIAS = { motorway: "Autoestrada", trunk: "Via rápida", primary: "Principal", secondary: "Secundária", tertiary: "Terciária",
+  unclassified: "Sem classe", residential: "Residencial", road: "Sem tipo", living_street: "Zona de coexistência", service: "Serviço / acesso" };
+const CELULA = 40;     // lado de cada quadrado da grelha, em metros
+const RAIO_RUA = 120;  // um quadrado sem rua a menos disto fica de fora (rio, parques, pistas)
+// Lisboa, quando não há áreas atuais para dar o limite do concelho
+const CAIXA_LISBOA = { s: 38.69, w: -9.235, n: 38.80, e: -9.085 };
+const COMO_TER_AREAS = "carrega em \"⬇ Atualizar áreas do goMAP\" (precisa do script Quartéis 112 e de um goMAP aberto há pouco).";
+// pela ordem de QUARTEIS; escolhidas para os vizinhos não terem cores parecidas
+const CORES = ["#d62728", "#ff7f0e", "#8c564b", "#e6c200", "#9467bd", "#2ca02c", "#e377c2", "#1f77b4", "#17becf", "#393b79", "#e7298a"];
+
+// metros num plano local (chega para o tamanho de Lisboa)
+const LAT0 = 38.74, LNG0 = -9.15, KX = 111320 * Math.cos(LAT0 * Math.PI / 180), KY = 110540;
+const metros = (lat1, lng1, lat2, lng2) => Math.hypot((lng2 - lng1) * KX, (lat2 - lat1) * KY);
+
+const $ = id => document.getElementById(id);
+const QUARTEIS = window.QUARTEIS || [];
+const minutos = s => { if (!isFinite(s)) return "—"; s = Math.round(s); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+
+function estado(texto, erro = false) {
+  $("estado").textContent = texto;
+  $("estado").classList.toggle("erro", erro);
+}
+
+// ---------- grafo das ruas ----------
+
+// ligações dirigidas entre os pontos das vias do OSM, com o tempo em segundos; guardadas por ponto de partida
+// (inicio[a]..inicio[a+1] são as ligações que saem de a)
+function construirGrafo(osm, sentidos) {
+  const indice = new Map(), lat = [], lng = [];
+  for (const e of osm.elements) if (e.type === "node") { indice.set(e.id, lat.length); lat.push(e.lat); lng.push(e.lon); }
+  const n = lat.length, de = [], para = [], seg = [], vias = [];
+  const principal = new Uint8Array(n); // ponto numa via que não é de serviço: é aqui que os quartéis se ligam à rede
+  for (const w of osm.elements) {
+    if (w.type !== "way" || !w.tags || !w.nodes) continue;
+    const t = w.tags, tipo = t.highway.replace(/_link$/, ""), base = VELOCIDADES[tipo];
+    if (!base || t.access === "no" || t.area === "yes" || /^(parking_aisle|drive-through)$/.test(t.service || "")) continue;
+    const max = parseFloat(t.maxspeed), ms = Math.min(base, max > 0 ? max : Infinity) / 3.6;
+    // 1 = só no sentido do desenho, -1 = só ao contrário, 0 = os dois
+    const sentido = !sentidos ? 0 : t.oneway === "-1" ? -1
+      : /^(yes|true|1)$/.test(t.oneway || "") || /^(roundabout|circular)$/.test(t.junction || "") || (tipo === "motorway" && t.oneway !== "no") ? 1 : 0;
+    const nos = w.nodes.map(id => indice.get(id)).filter(i => i !== undefined);
+    if (nos.length < 2) continue;
+    vias.push(Int32Array.from(nos));
+    for (let k = 1; k < nos.length; k++) {
+      const a = nos[k - 1], b = nos[k], s = metros(lat[a], lng[a], lat[b], lng[b]) / ms;
+      if (sentido >= 0) { de.push(a); para.push(b); seg.push(s); }
+      if (sentido <= 0) { de.push(b); para.push(a); seg.push(s); }
+      if (tipo !== "service" && tipo !== "living_street") principal[a] = principal[b] = 1;
+    }
+  }
+  const inicio = new Int32Array(n + 1);
+  for (const a of de) inicio[a + 1]++;
+  for (let i = 0; i < n; i++) inicio[i + 1] += inicio[i];
+  const pos = inicio.slice(0, n), alvo = new Int32Array(de.length), custo = new Float32Array(de.length);
+  for (let k = 0; k < de.length; k++) { const p = pos[de[k]]++; alvo[p] = para[k]; custo[p] = seg[k]; }
+  return { n, lat: Float64Array.from(lat), lng: Float64Array.from(lng), inicio, alvo, custo, principal, vias };
+}
+
+// tempo (s) da origem até cada ponto, pelas ligações dirigidas (Dijkstra com uma fila de prioridade binária);
+// anterior[i] = ponto de onde se chega a i no caminho mais rápido, para refazer o percurso
+function dijkstra(g, origem) {
+  const t = new Float64Array(g.n).fill(Infinity), anterior = new Int32Array(g.n).fill(-1), fn = [], ft = [];
+  const juntar = (no, tempo) => {
+    let i = fn.length;
+    fn.push(no); ft.push(tempo);
+    while (i > 0) { const p = (i - 1) >> 1; if (ft[p] <= tempo) break; fn[i] = fn[p]; ft[i] = ft[p]; i = p; }
+    fn[i] = no; ft[i] = tempo;
+  };
+  const tirar = () => {
+    const topo = fn[0], ultN = fn.pop(), ultT = ft.pop(), m = fn.length;
+    if (m) {
+      let i = 0;
+      for (;;) {
+        let f = 2 * i + 1;
+        if (f >= m) break;
+        if (f + 1 < m && ft[f + 1] < ft[f]) f++;
+        if (ft[f] >= ultT) break;
+        fn[i] = fn[f]; ft[i] = ft[f]; i = f;
+      }
+      fn[i] = ultN; ft[i] = ultT;
+    }
+    return topo;
+  };
+  t[origem] = 0;
+  juntar(origem, 0);
+  while (fn.length) {
+    const tt = ft[0], a = tirar();
+    if (tt > t[a]) continue;
+    for (let k = g.inicio[a]; k < g.inicio[a + 1]; k++) {
+      const b = g.alvo[k], nt = tt + g.custo[k];
+      if (nt < t[b]) { t[b] = nt; anterior[b] = a; juntar(b, nt); }
+    }
+  }
+  return { tempo: Float32Array.from(t), anterior };
+}
+
+// pontos do percurso mais rápido do quartel q até ao ponto "no", do quartel para o destino
+function percurso(q, no) {
+  const ant = R.anteriores[q], nos = [];
+  for (let i = no; i >= 0; i = ant[i]) nos.push(i);
+  return nos.reverse();
+}
+
+// ponto da rede mais perto, só entre os que passam no filtro
+function pontoMaisPerto(g, lat, lng, filtro) {
+  let melhor = -1, dm = Infinity;
+  for (let i = 0; i < g.n; i++) {
+    if (!filtro(i)) continue;
+    const d = metros(lat, lng, g.lat[i], g.lng[i]);
+    if (d < dm) { dm = d; melhor = i; }
+  }
+  return { no: melhor, d: dm };
+}
+
+// índice espacial dos pontos da rede, em baldes de 100 m
+const BALDE = 100;
+const chaveBalde = (bx, by) => (bx + 50000) * 100000 + by + 50000;
+function indiceEspacial(g, filtro) {
+  const m = new Map();
+  for (let i = 0; i < g.n; i++) {
+    if (!filtro(i)) continue;
+    const k = chaveBalde(Math.floor((g.lng[i] - LNG0) * KX / BALDE), Math.floor((g.lat[i] - LAT0) * KY / BALDE));
+    (m.get(k) || m.set(k, []).get(k)).push(i);
+  }
+  return m;
+}
+function pertoNoIndice(g, ind, lat, lng, raio) {
+  const bx = Math.floor((lng - LNG0) * KX / BALDE), by = Math.floor((lat - LAT0) * KY / BALDE), r = Math.ceil(raio / BALDE);
+  let melhor = -1, dm = raio;
+  for (let x = bx - r; x <= bx + r; x++) for (let y = by - r; y <= by + r; y++) {
+    for (const i of ind.get(chaveBalde(x, y)) || []) {
+      const d = metros(lat, lng, g.lat[i], g.lng[i]);
+      if (d <= dm) { dm = d; melhor = i; }
+    }
+  }
+  return melhor;
+}
+
+// ---------- áreas atuais (goMAP) ----------
+
+// [{ nome, aneis: [[[lng, lat], ...], ...], quartel }]; o quartel de cada área é o que está dentro dela (ou, sem nenhum, o do nome)
+function lerAreas() {
+  const fs = window.AREAS_ATUAIS && window.AREAS_ATUAIS.features;
+  if (!fs) return [];
+  const palavras = s => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").split(/[^a-z]+/).filter(p => p.length >= 4);
+  const areas = fs.filter(f => f.geometry && f.geometry.rings).map(f => {
+    const nome = String(f.attributes.NOME || f.attributes.nome || "?");
+    return { nome, aneis: f.geometry.rings, quartel: -1 };
+  });
+  for (const a of areas) {
+    a.quartel = QUARTEIS.findIndex(q => dentroDe(a.aneis, q.lng, q.lat));
+    if (a.quartel < 0) {
+      const w = palavras(a.nome);
+      a.quartel = QUARTEIS.findIndex(q => palavras(q.nome).every(p => w.includes(p)));
+    }
+  }
+  return areas;
+}
+
+// par-ímpar: serve para áreas com buracos e com várias partes
+function dentroDe(aneis, x, y) {
+  let dentro = false;
+  for (const anel of aneis) for (let k = 1; k < anel.length; k++) {
+    const [x1, y1] = anel[k - 1], [x2, y2] = anel[k];
+    if ((y1 > y) !== (y2 > y) && x < x1 + (y - y1) * (x2 - x1) / (y2 - y1)) dentro = !dentro;
+  }
+  return dentro;
+}
+
+// ---------- grelha ----------
+
+// quadrados de CELULA metros sobre Lisboa; cada um fica com a área atual em que está e o ponto da rede mais perto
+function construirGrelha(g, ind, areas) {
+  let s = Infinity, w = Infinity, n = -Infinity, e = -Infinity;
+  for (const a of areas) for (const anel of a.aneis) for (const [x, y] of anel) {
+    if (y < s) s = y; if (y > n) n = y; if (x < w) w = x; if (x > e) e = x;
+  }
+  if (!areas.length) ({ s, w, n, e } = CAIXA_LISBOA);
+  const dLat = CELULA / KY, dLng = CELULA / KX;
+  const cols = Math.ceil((e - w) / dLng), linhas = Math.ceil((n - s) / dLat), total = cols * linhas;
+  const area = new Int16Array(total).fill(areas.length ? -1 : -2); // -2 = sem áreas atuais: conta tudo
+  areas.forEach((a, k) => rasterizar(a.aneis, k, area, { cols, linhas, w, n, dLat, dLng }));
+  const no = new Int32Array(total).fill(-1);
+  for (let j = 0; j < linhas; j++) for (let i = 0; i < cols; i++) {
+    const c = j * cols + i;
+    if (area[c] === -1) continue;
+    no[c] = pertoNoIndice(g, ind, n - (j + 0.5) * dLat, w + (i + 0.5) * dLng, RAIO_RUA);
+  }
+  return { cols, linhas, w, n, s: n - linhas * dLat, e: w + cols * dLng, dLat, dLng, area, no };
+}
+
+// marca com "valor" os quadrados cujo centro está dentro dos anéis (linha a linha, par-ímpar)
+function rasterizar(aneis, valor, destino, { cols, linhas, w, n, dLat, dLng }) {
+  for (let j = 0; j < linhas; j++) {
+    const y = n - (j + 0.5) * dLat, xs = [];
+    for (const anel of aneis) for (let k = 1; k < anel.length; k++) {
+      const [x1, y1] = anel[k - 1], [x2, y2] = anel[k];
+      if ((y1 > y) !== (y2 > y)) xs.push(x1 + (y - y1) * (x2 - x1) / (y2 - y1));
+    }
+    xs.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const i0 = Math.max(0, Math.ceil((xs[k] - w) / dLng - 0.5)), i1 = Math.min(cols - 1, Math.floor((xs[k + 1] - w) / dLng - 0.5));
+      for (let i = i0; i <= i1; i++) destino[j * cols + i] = valor;
+    }
+  }
+}
+
+// ---------- cálculo ----------
+
+let R = null; // resultado do último cálculo
+let AREAS = lerAreas();
+
+function calcular() {
+  const t0 = performance.now();
+  const g = construirGrafo(window.RUAS_OSM, $("sentidos").checked);
+  const saida = i => g.inicio[i + 1] > g.inicio[i];
+  const origens = QUARTEIS.map(q => pontoMaisPerto(g, q.lat, q.lng, i => g.principal[i] && saida(i)));
+  const caminhos = origens.map(o => dijkstra(g, o.no));
+  const tempos = caminhos.map(c => c.tempo), anteriores = caminhos.map(c => c.anterior);
+  const melhorQ = new Int8Array(g.n).fill(-1), melhorT = new Float32Array(g.n).fill(Infinity);
+  tempos.forEach((t, q) => { for (let i = 0; i < g.n; i++) if (t[i] < melhorT[i]) { melhorT[i] = t[i]; melhorQ[i] = q; } });
+  const ind = indiceEspacial(g, i => melhorQ[i] >= 0);
+  const grelha = construirGrelha(g, ind, AREAS);
+  R = { g, origens, tempos, anteriores, melhorQ, melhorT, ind, grelha };
+  desenhar();
+  preencherTabela();
+  const avisos = AREAS.filter(a => a.quartel < 0).map(a => `área "${a.nome}" sem quartel conhecido`);
+  estado(`${g.n.toLocaleString("pt-PT")} pontos de rua, ${QUARTEIS.length} quartéis · calculado em ${((performance.now() - t0) / 1000).toFixed(1)} s`
+    + (AREAS.length ? `\n${AREAS.length} áreas atuais do goMAP` : `\nSem áreas atuais: ${COMO_TER_AREAS}`)
+    + (avisos.length ? "\n" + avisos.join("\n") : "")
+    + (comScript() ? `\n📍 Ligada ao Quartéis 112 (${comScript()}): o ponto marcado no goMAP pela Moradas 112 aparece aqui.`
+      : "\nSem ligação ao Quartéis 112: o script não está ativo nesta página (precisa da versão 4.66 ou mais)."));
+  if (pontoPendente) { const p = pontoPendente; pontoPendente = null; pontoDaMoradas(p); }
+}
+
+// quartel atual e proposto de um quadrado (-1 = nenhum)
+const quartelAtual = c => R.grelha.area[c] >= 0 ? AREAS[R.grelha.area[c]].quartel : -1;
+const quartelProposto = c => R.grelha.no[c] >= 0 ? R.melhorQ[R.grelha.no[c]] : -1;
+
+// ---------- mapa ----------
+
+const mapa = L.map("mapa", { preferCanvas: true }).setView([38.74, -9.15], 12);
+L.tileLayer("https://gisrsb.cm-lisboa.pt/arcgisrsb/rest/services/MapaBase_WGS84/MapServer/tile/{z}/{y}/{x}",
+  { minZoom: 11, maxZoom: 20, maxNativeZoom: 20, attribution: "CM Lisboa · © OpenStreetMap" }).addTo(mapa);
+const tela = L.canvas({ padding: 0.3 });
+let camadaGrelha = null, camadaRuas = null, camadaAtuais = null;
+const camadaQuarteis = L.layerGroup().addTo(mapa);
+const rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+
+function desenhar() {
+  const fundo = document.querySelector("input[name=fundo]:checked").value;
+  if (camadaGrelha) camadaGrelha.remove();
+  camadaGrelha = null;
+  if (fundo !== "nada") {
+    const { cols, linhas, s, w, n, e } = R.grelha, cv = document.createElement("canvas");
+    cv.width = cols; cv.height = linhas;
+    const cx = cv.getContext("2d"), img = cx.createImageData(cols, linhas), cores = CORES.map(rgb);
+    for (let c = 0; c < cols * linhas; c++) {
+      const q = quartelProposto(c);
+      if (q < 0) continue;
+      if (fundo === "mudancas") { const a = quartelAtual(c); if (a < 0 || a === q) continue; }
+      img.data.set([...cores[q], fundo === "mudancas" ? 190 : 115], c * 4);
+    }
+    cx.putImageData(img, 0, 0);
+    camadaGrelha = L.imageOverlay(cv.toDataURL(), [[s, w], [n, e]], { className: "grelha", interactive: false }).addTo(mapa);
+  }
+  desenharRuas();
+  desenharAtuais();
+  desenharQuarteis();
+}
+
+// cada via partida em troços do mesmo quartel mais rápido
+function desenharRuas() {
+  if (camadaRuas) camadaRuas.remove();
+  camadaRuas = null;
+  if (!$("verRuas").checked) return;
+  const { g, melhorQ } = R, partes = QUARTEIS.map(() => []);
+  for (const via of g.vias) {
+    let troco = [], q = -2;
+    for (const no of via) {
+      const p = [g.lat[no], g.lng[no]];
+      if (melhorQ[no] !== q) {
+        if (troco.length && q >= 0) partes[q].push([...troco, p]);
+        troco = [];
+        q = melhorQ[no];
+      }
+      troco.push(p);
+    }
+    if (troco.length > 1 && q >= 0) partes[q].push(troco);
+  }
+  camadaRuas = L.layerGroup(partes.map((p, q) => L.polyline(p, { color: CORES[q], weight: 2, opacity: 0.9, renderer: tela, interactive: false }))).addTo(mapa);
+}
+
+function desenharAtuais() {
+  if (camadaAtuais) camadaAtuais.remove();
+  camadaAtuais = null;
+  if (!$("verAtuais").checked || !AREAS.length) return;
+  camadaAtuais = L.layerGroup(AREAS.map(a => L.polygon(a.aneis.map(anel => anel.map(([x, y]) => [y, x])), {
+    color: a.quartel >= 0 ? CORES[a.quartel] : "#333", weight: 2.5, dashArray: "6 5", fill: false, renderer: tela
+  }).bindTooltip("Área atual: " + a.nome, { sticky: true }))).addTo(mapa);
+}
+
+function desenharQuarteis() {
+  camadaQuarteis.clearLayers();
+  QUARTEIS.forEach((q, k) => {
+    const o = R.origens[k], p = [R.g.lat[o.no], R.g.lng[o.no]];
+    if (o.d > 25) L.polyline([[q.lat, q.lng], p], { color: "#000", weight: 1.5, dashArray: "2 4", interactive: false }).addTo(camadaQuarteis);
+    L.circleMarker([q.lat, q.lng], { radius: 8, color: "#fff", weight: 2, fillColor: CORES[k], fillOpacity: 1 })
+      .bindTooltip(q.nome, { permanent: true, direction: "right", offset: [8, 0], className: "rotulo" })
+      .bindPopup(`<b>${q.nome}</b><br>sai pela rua a ${Math.round(o.d)} m`)
+      .addTo(camadaQuarteis);
+  });
+}
+
+// ---------- clique: tempos de cada quartel e o percurso ----------
+
+const camadaPercurso = L.layerGroup().addTo(mapa);
+
+// desenha o percurso do quartel q até ao ponto "no" (e, a tracejado, a ligação até onde se clicou); devolve os km
+function desenharPercurso(q, no, destino, tracejado) {
+  const pts = percurso(q, no).map(i => [R.g.lat[i], R.g.lng[i]]);
+  let m = 0;
+  for (let k = 1; k < pts.length; k++) m += metros(pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1]);
+  const quartel = [QUARTEIS[q].lat, QUARTEIS[q].lng];
+  L.polyline(pts, { color: "#fff", weight: 8, opacity: 0.9, interactive: false }).addTo(camadaPercurso);
+  L.polyline(pts, { color: CORES[q], weight: 5, dashArray: tracejado ? "10 8" : null, interactive: false }).addTo(camadaPercurso);
+  L.polyline([quartel, pts[0]], { color: CORES[q], weight: 2, dashArray: "2 5", interactive: false }).addTo(camadaPercurso);
+  L.polyline([pts[pts.length - 1], destino], { color: CORES[q], weight: 2, dashArray: "2 5", interactive: false }).addTo(camadaPercurso);
+  return m / 1000;
+}
+
+// tempos de cada quartel até ao ponto, num popup, e os percursos; titulo = morada que veio da Moradas 112
+function verPonto(latlng, titulo) {
+  const { lat, lng } = latlng, no = pertoNoIndice(R.g, R.ind, lat, lng, 300);
+  if (no < 0) return;
+  const lista = QUARTEIS.map((q, k) => ({ q, k, t: R.tempos[k][no] })).sort((a, b) => a.t - b.t);
+  const { grelha } = R, i = Math.floor((lng - grelha.w) / grelha.dLng), j = Math.floor((grelha.n - lat) / grelha.dLat);
+  const c = i >= 0 && j >= 0 && i < grelha.cols && j < grelha.linhas ? j * grelha.cols + i : -1;
+  const atual = c >= 0 ? quartelAtual(c) : -1, maisRapido = lista[0].k;
+  const mostrar = lista.filter((x, pos) => pos < 6 || x.k === atual);
+
+  const caixa = document.createElement("div");
+  caixa.innerHTML = (titulo ? `<div class="titulo">📍 </div>` : "") + `<table class="popup">${mostrar.map(({ q, k, t }) =>
+    `<tr data-q="${k}" title="Ver o percurso"><td><span class="cor" style="background:${CORES[k]}"></span>${q.nome}${k === atual ? " (atual)" : ""}</td>`
+    + `<td>${minutos(t)}</td><td class="km"></td></tr>`).join("")}</table>`
+    + `<span class="nota">até ao ponto de rua a ${Math.round(metros(lat, lng, R.g.lat[no], R.g.lng[no]))} m · clica num quartel para ver o percurso</span>`;
+  if (titulo) caixa.querySelector(".titulo").append(titulo); // texto, nunca HTML
+  // mostra os percursos pedidos: o primeiro a cheio, os outros tracejados
+  const ver = qs => {
+    camadaPercurso.clearLayers();
+    for (const tr of caixa.querySelectorAll("tr")) { tr.classList.remove("visto"); tr.querySelector(".km").textContent = ""; }
+    qs.forEach((q, pos) => {
+      if (!isFinite(R.tempos[q][no])) return;
+      const km = desenharPercurso(q, no, latlng, pos > 0), tr = caixa.querySelector(`tr[data-q="${q}"]`);
+      if (tr) { tr.classList.add("visto"); tr.querySelector(".km").textContent = km.toFixed(1).replace(".", ",") + " km"; }
+    });
+  };
+  for (const tr of caixa.querySelectorAll("tr")) tr.addEventListener("click", () => ver([Number(tr.dataset.q)]));
+  // primeiro o popup: abrir este fecha o anterior, e fechar apaga os percursos
+  L.popup().setLatLng(latlng).setContent(caixa).openOn(mapa);
+  ver(atual >= 0 && atual !== maisRapido ? [maisRapido, atual] : [maisRapido]);
+}
+mapa.on("click", ev => R && verPonto(ev.latlng));
+mapa.on("popupclose", () => camadaPercurso.clearLayers());
+
+// ---------- ponto vindo da Moradas 112 (script exportar-areas.user.js) ----------
+
+// o script põe este atributo na página e manda cada ponto marcado no goMAP como evento "areas-ponto"
+const camadaOcorrencia = L.layerGroup().addTo(mapa);
+let pontoPendente = null; // chegou antes de acabar o cálculo
+function pontoDaMoradas(p) {
+  if (!R) { pontoPendente = p; return; }
+  const ll = L.latLng(p.lat, p.lng);
+  camadaOcorrencia.clearLayers();
+  L.circleMarker(ll, { radius: 9, color: "#fff", weight: 3, fillColor: "#c62828", fillOpacity: 1, interactive: false }).addTo(camadaOcorrencia);
+  mapa.setView(ll, Math.max(mapa.getZoom(), 15), { animate: false });
+  verPonto(ll, p.morada || "Ponto da Moradas 112");
+}
+document.addEventListener("areas-ponto", e => {
+  try { pontoDaMoradas(JSON.parse(e.detail)); } catch (err) { console.error(err); }
+});
+
+// ---------- tabela ----------
+
+function resumo(valores) {
+  if (!valores.length) return { media: NaN, p95: NaN };
+  valores.sort((a, b) => a - b);
+  return { media: valores.reduce((s, v) => s + v, 0) / valores.length, p95: valores[Math.min(valores.length - 1, Math.floor(valores.length * 0.95))] };
+}
+
+function preencherTabela() {
+  const { grelha, tempos, melhorT } = R, km2 = CELULA * CELULA / 1e6, total = grelha.cols * grelha.linhas;
+  const atual = QUARTEIS.map(() => []), proposta = QUARTEIS.map(() => []), todosAtual = [], todosProposta = [];
+  let mudam = 0, contados = 0;
+  for (let c = 0; c < total; c++) {
+    const no = grelha.no[c];
+    if (no < 0) continue;
+    const a = quartelAtual(c), p = quartelProposto(c);
+    if (p < 0) continue;
+    proposta[p].push(melhorT[no]); todosProposta.push(melhorT[no]);
+    if (a >= 0 && isFinite(tempos[a][no])) { atual[a].push(tempos[a][no]); todosAtual.push(tempos[a][no]); }
+    if (a >= 0) { contados++; if (a !== p) mudam++; }
+  }
+  const temAtual = AREAS.length > 0;
+  const comparar = (x, y) => !temAtual || !isFinite(x) ? "" : y < x - 5 ? "melhor" : y > x + 5 ? "pior" : "";
+  const celulas = (ra, rp) => temAtual
+    ? `<td>${minutos(ra.media)}</td><td class="${comparar(ra.media, rp.media)}">${minutos(rp.media)}</td><td>${minutos(ra.p95)}</td><td class="${comparar(ra.p95, rp.p95)}">${minutos(rp.p95)}</td>`
+    : `<td>${minutos(rp.media)}</td><td>${minutos(rp.p95)}</td>`;
+  const cab = temAtual
+    ? "<tr><th>Quartel</th><th>km² atual</th><th>km² prop.</th><th>Média atual</th><th>Média prop.</th><th>P95 atual</th><th>P95 prop.</th></tr>"
+    : "<tr><th>Quartel</th><th>km² prop.</th><th>Média</th><th>P95</th></tr>";
+  const linhas = QUARTEIS.map((q, k) => {
+    const ra = resumo(atual[k]), rp = resumo(proposta[k]);
+    return `<tr><td><span class="cor" style="background:${CORES[k]}"></span>${q.nome}</td>`
+      + (temAtual ? `<td>${(atual[k].length * km2).toFixed(1)}</td>` : "") + `<td>${(proposta[k].length * km2).toFixed(1)}</td>` + celulas(ra, rp) + "</tr>";
+  }).join("");
+  const ta = resumo(todosAtual), tp = resumo(todosProposta);
+  const tot = `<tr class="total"><td>Lisboa</td>` + (temAtual ? `<td>${(todosAtual.length * km2).toFixed(1)}</td>` : "")
+    + `<td>${(todosProposta.length * km2).toFixed(1)}</td>` + celulas(ta, tp) + "</tr>";
+  $("tabela").innerHTML = cab + linhas + tot
+    + (temAtual ? `<tr><td colspan="7" class="nota">Mudam de quartel ${(mudam * km2).toFixed(1)} km² (${(100 * mudam / Math.max(contados, 1)).toFixed(0)} % da área com ruas).</td></tr>` : "");
+}
+
+// ---------- exportar ----------
+
+// contornos dos quadrados do quartel q: cada lado de um quadrado do quartel virado para fora é uma aresta, e as arestas
+// ligam-se em anéis. Os anéis exteriores e os buracos saem com voltas contrárias (pela área com sinal)
+function poligonosDe(q) {
+  const { cols, linhas, w, n, dLat, dLng } = R.grelha, W = cols + 1, saidas = new Map();
+  const em = (i, j) => i >= 0 && j >= 0 && i < cols && j < linhas && quartelProposto(j * cols + i) === q;
+  const v = (i, j) => j * W + i;
+  const aresta = (a, b) => (saidas.get(a) || saidas.set(a, []).get(a)).push(b);
+  for (let j = 0; j < linhas; j++) for (let i = 0; i < cols; i++) {
+    if (!em(i, j)) continue;
+    if (!em(i, j - 1)) aresta(v(i, j), v(i + 1, j));
+    if (!em(i + 1, j)) aresta(v(i + 1, j), v(i + 1, j + 1));
+    if (!em(i, j + 1)) aresta(v(i + 1, j + 1), v(i, j + 1));
+    if (!em(i - 1, j)) aresta(v(i, j + 1), v(i, j));
+  }
+  const exteriores = [], buracos = [];
+  for (const [inicio] of saidas) {
+    while (saidas.has(inicio)) {
+      const anel = [];
+      let a = inicio;
+      do {
+        anel.push([a % W, Math.floor(a / W)]);
+        const l = saidas.get(a), b = l.pop();
+        if (!l.length) saidas.delete(a);
+        a = b;
+      } while (a !== inicio);
+      // tira os pontos a meio de um lado direito
+      const p = anel.filter((c, k) => {
+        const ant = anel[(k + anel.length - 1) % anel.length], seg = anel[(k + 1) % anel.length];
+        return !((ant[0] === c[0] && c[0] === seg[0]) || (ant[1] === c[1] && c[1] === seg[1]));
+      });
+      let soma = 0;
+      for (let k = 0; k < p.length; k++) { const [x1, y1] = p[k], [x2, y2] = p[(k + 1) % p.length]; soma += x1 * y2 - x2 * y1; }
+      if (soma > 0) exteriores.push({ p, soma }); else buracos.push(p);
+    }
+  }
+  // em graus, fechado e com a volta do GeoJSON (exterior no sentido contrário ao dos ponteiros)
+  const geo = p => [...p, p[0]].map(([i, j]) => [+(w + i * dLng).toFixed(6), +(n - j * dLat).toFixed(6)]).reverse();
+  // do mais pequeno para o maior: um buraco fica no exterior mais justo que o contém (uma ilha dentro de um buraco é outro exterior)
+  const poligonos = exteriores.sort((a, b) => a.soma - b.soma).map(ext => [ext.p]);
+  for (const b of buracos) {
+    const [x, y] = [b[0][0] + 0.01, b[0][1] + 0.013];
+    const dono = poligonos.find(pg => dentroDe([[...pg[0], pg[0][0]]], x, y));
+    if (dono) dono.push(b);
+  }
+  return poligonos.map(pg => pg.map(geo));
+}
+
+// o browser descarrega o ficheiro (normalmente para as Transferências, ou pergunta onde)
+function guardarFicheiro(nome, texto, tipo) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([texto], { type: tipo }));
+  a.download = nome;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function exportar() {
+  if (!R) return;
+  const km2 = CELULA * CELULA / 1e6, total = R.grelha.cols * R.grelha.linhas;
+  const features = QUARTEIS.map((q, k) => {
+    let celulas = 0;
+    for (let c = 0; c < total; c++) if (quartelProposto(c) === k) celulas++;
+    return { type: "Feature", properties: { quartel: q.nome, area_km2: +(celulas * km2).toFixed(2), celula_m: CELULA, sentidos_unicos: $("sentidos").checked },
+      geometry: { type: "MultiPolygon", coordinates: poligonosDe(k) } };
+  }).filter(f => f.geometry.coordinates.length);
+  guardarFicheiro("proposta-areas-quarteis.geojson", JSON.stringify({ type: "FeatureCollection", features }), "application/geo+json");
+}
+
+// ---------- áreas atuais pelo script Quartéis 112 ----------
+
+// o script põe a sua versão em data-q112 e responde aos pedidos "areas-pedido" com "areas-resposta"
+const comScript = () => document.documentElement.dataset.q112 || "";
+let nPedido = 0;
+const pendentes = new Map();
+document.addEventListener("areas-resposta", e => {
+  const r = JSON.parse(e.detail), p = pendentes.get(r.id);
+  if (!p) return;
+  pendentes.delete(r.id);
+  r.erro ? p.falha(new Error(r.erro)) : p.ok(r.dados);
+});
+function q112(tipo, espera = 60000) {
+  return new Promise((ok, falha) => {
+    const id = ++nPedido;
+    pendentes.set(id, { ok, falha });
+    setTimeout(() => { if (pendentes.delete(id)) falha(new Error("o script Quartéis 112 não respondeu")); }, espera);
+    document.dispatchEvent(new CustomEvent("areas-pedido", { detail: JSON.stringify({ id, tipo }) }));
+  });
+}
+
+// sem as áreas do goMAP não há nada para contornar nem comparar
+function opcoesDasAreas() {
+  for (const i of [$("verAtuais"), document.querySelector("input[name=fundo][value=mudancas]")]) {
+    i.disabled = !AREAS.length;
+    i.parentElement.classList.toggle("falta", !AREAS.length);
+    i.parentElement.title = AREAS.length ? "" : "Precisa das áreas atuais: " + COMO_TER_AREAS;
+  }
+  $("areasData").textContent = !AREAS.length ? "Ainda não há áreas atuais: " + COMO_TER_AREAS
+    : `${AREAS.length} áreas` + (areasNovas ? ", descarregadas agora do goMAP: guarda o areas-atuais.js na pasta dados para ficarem para a próxima vez."
+      : window.AREAS_ATUAIS_DATA ? `, do goMAP em ${window.AREAS_ATUAIS_DATA}.` : ".");
+}
+let areasNovas = false;
+
+async function atualizarAreas() {
+  if (!comScript()) { estado("O script Quartéis 112 não está ativo nesta página: confirma no Tampermonkey que está ligado e na versão 4.66 ou mais, e carrega F5.", true); return; }
+  const b = $("atualizarAreas");
+  b.disabled = true;
+  estado("A pedir as áreas atuais ao goMAP…");
+  try {
+    const j = await q112("areasAtuais");
+    const quando = new Date().toISOString().slice(0, 16).replace("T", " ");
+    guardarFicheiro("areas-atuais.js", `// áreas atuais dos quartéis (goMAP, Temas RSB, camada 14): dados internos da CML, não publicar\n`
+      + `window.AREAS_ATUAIS_DATA = "${quando}";\nwindow.AREAS_ATUAIS = ${JSON.stringify(j)};\n`, "text/javascript");
+    window.AREAS_ATUAIS = j;
+    window.AREAS_ATUAIS_DATA = quando;
+    areasNovas = true;
+    AREAS = lerAreas();
+    opcoesDasAreas();
+    if (window.RUAS_OSM) emSeguida("A recalcular com as áreas novas…", calcular);
+    else estado("Áreas atualizadas. Faltam as ruas: corre o \"Extrair dados.bat\".", true);
+  } catch (e) {
+    estado("Áreas do goMAP: " + e.message, true);
+  }
+  b.disabled = false;
+}
+
+// ---------- arranque ----------
+
+$("celula").textContent = CELULA;
+opcoesDasAreas();
+$("velocidades").innerHTML = Object.keys(VELOCIDADES).map(k =>
+  `<tr><td>${NOMES_VIAS[k]}</td><td><input type="number" min="5" max="120" step="5" data-via="${k}" value="${VELOCIDADES[k]}"></td></tr>`).join("");
+
+// os cálculos prendem a página uns segundos: o estado aparece antes
+function emSeguida(texto, fn) {
+  estado(texto);
+  setTimeout(() => {
+    try { fn(); } catch (e) { console.error(e); estado("Erro: " + e.message, true); }
+  }, 30);
+}
+
+$("recalcular").addEventListener("click", () => {
+  for (const i of document.querySelectorAll("#velocidades input")) {
+    const v = Number(i.value);
+    if (v > 0) VELOCIDADES[i.dataset.via] = v;
+  }
+  emSeguida("A recalcular…", calcular);
+});
+$("sentidos").addEventListener("change", () => $("recalcular").click());
+$("exportar").addEventListener("click", exportar);
+$("atualizarAreas").addEventListener("click", atualizarAreas);
+for (const r of document.querySelectorAll("input[name=fundo]")) r.addEventListener("change", () => R && desenhar());
+$("verAtuais").addEventListener("change", () => R && desenharAtuais());
+$("verRuas").addEventListener("change", () => R && desenharRuas());
+
+if (!window.RUAS_OSM) {
+  estado("Faltam as ruas: corre o \"Extrair dados.bat\" (descarrega as ruas do OpenStreetMap) e carrega F5.", true);
+} else {
+  emSeguida("A calcular os tempos de percurso dos 11 quartéis…", calcular);
+}
+</script>
+</body>
+</html>
