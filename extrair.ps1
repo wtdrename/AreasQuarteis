@@ -1,4 +1,4 @@
-﻿# Descarrega os dados que a página "Areas Quarteis.html" usa e grava-os na pasta dados, como ficheiros .js
+﻿# Descarrega os dados que a página "index.html" usa e grava-os na pasta dados, como ficheiros .js
 # (uma página aberta do disco carrega .js, mas não .json). Não fica nada a correr: faz os pedidos e termina.
 #   - ruas de Lisboa e arredores, do OpenStreetMap (Overpass): tipo de via, sentidos únicos, velocidade máxima
 #   - áreas atuais dos quartéis, do goMAP (precisa do token do goMAP)
@@ -104,4 +104,4 @@ if (-not $SoRuas -and -not $Token) {
 }
 
 Write-Host ''
-Write-Host 'Pronto. Abre (ou atualiza com F5) o "Areas Quarteis.html".' -ForegroundColor Green
+Write-Host 'Pronto. Abre (ou atualiza com F5) o "index.html".' -ForegroundColor Green

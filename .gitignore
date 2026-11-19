@@ -1,5 +1,5 @@
-# dados descarregados pelo extrair.ps1: refazem-se a qualquer altura
-# (as áreas atuais são dados internos da CML; as ruas têm ~20 MB)
-dados/ruas.js
+# áreas atuais: dados internos da CML, não vão para o site público
+# (refazem-se com o extrair.ps1 ou com o botão "Atualizar áreas do goMAP";
+# as ruas, do OpenStreetMap, vão no repositório porque o site precisa delas)
 dados/areas-atuais.js
 *.geojson
