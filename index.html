@@ -11,7 +11,12 @@
   html, body { height: 100%; margin: 0; }
   body { display: flex; font: 13px/1.4 system-ui, "Segoe UI", sans-serif; color: #1d2329; background: #fff; }
   #painel { width: 450px; flex: none; overflow-y: auto; padding: 12px 14px; border-right: 1px solid var(--borda); }
-  #mapa { flex: 1; }
+  #moldura { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #abas { display: flex; gap: 2px; padding: 4px 6px 0; background: #eef1f4; border-bottom: 1px solid var(--borda); }
+  #abas button { padding: 5px 14px; font: inherit; border: 1px solid var(--borda); border-bottom: none; border-radius: 6px 6px 0 0; background: #dde2e7; cursor: pointer; }
+  #abas button.ativa { background: #fff; font-weight: 600; margin-bottom: -1px; }
+  #mapa, #google { flex: 1; border: 0; }
+  #google[hidden], #mapa[hidden] { display: none; }
   h1 { font-size: 17px; margin: 0 0 4px; }
   h2 { font-size: 13px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--suave); }
   label { display: block; margin: 3px 0; cursor: pointer; }
@@ -71,7 +76,14 @@
   <p class="nota">Clica no mapa para ver quanto tempo cada quartel demora a chegar a esse ponto.<br>
     Ruas: © colaboradores do OpenStreetMap (ODbL). Mapa base: CM Lisboa.</p>
 </aside>
-<div id="mapa"></div>
+<div id="moldura">
+  <div id="abas">
+    <button type="button" data-aba="mapa" class="ativa">Mapa da Câmara</button>
+    <button type="button" data-aba="google">Google Maps</button>
+  </div>
+  <div id="mapa"></div>
+  <iframe id="google" hidden title="Google Maps" referrerpolicy="no-referrer-when-downgrade"></iframe>
+</div>
 
 <script src="leaflet.js"></script>
 <script src="dados/quarteis.js"></script>
@@ -437,7 +449,8 @@ function verPonto(latlng, titulo) {
   caixa.innerHTML = (titulo ? `<div class="titulo">📍 </div>` : "") + `<table class="popup">${mostrar.map(({ q, k, t }) =>
     `<tr data-q="${k}" title="Ver o percurso"><td><span class="cor" style="background:${CORES[k]}"></span>${q.nome}${k === atual ? " (atual)" : ""}</td>`
     + `<td>${minutos(t)}</td><td class="km"></td></tr>`).join("")}</table>`
-    + `<span class="nota">até ao ponto de rua a ${Math.round(metros(lat, lng, R.g.lat[no], R.g.lng[no]))} m · clica num quartel para ver o percurso</span>`;
+    + `<span class="nota">até ao ponto de rua a ${Math.round(metros(lat, lng, R.g.lat[no], R.g.lng[no]))} m · clica num quartel para ver o percurso</span>`
+    + `<br><a class="nota" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(6)},${lng.toFixed(6)}">🌍 Ver no Google Maps</a>`;
   if (titulo) caixa.querySelector(".titulo").append(titulo); // texto, nunca HTML
   // mostra os percursos pedidos: o primeiro a cheio, os outros tracejados
   const ver = qs => {
@@ -469,7 +482,28 @@ function pontoDaMoradas(p) {
   L.circleMarker(ll, { radius: 9, color: "#fff", weight: 3, fillColor: "#c62828", fillOpacity: 1, interactive: false }).addTo(camadaOcorrencia);
   mapa.setView(ll, Math.max(mapa.getZoom(), 15), { animate: false });
   verPonto(ll, p.morada || "Ponto da Moradas 112");
+  pontoGoogle = ll;
+  if (!$("google").hidden) mostrarGoogle();
 }
+// ---------- abas: mapa da Câmara / Google Maps ----------
+
+// o Google mostra o último ponto escolhido (clique ou Moradas 112); sem ponto, o centro do mapa da Câmara
+let pontoGoogle = null;
+mapa.on("click", ev => { pontoGoogle = ev.latlng; });
+function mostrarGoogle() {
+  const g = $("google"), c = pontoGoogle || mapa.getCenter(), z = Math.min(mapa.getZoom(), 19);
+  const src = `https://maps.google.com/maps?q=${c.lat.toFixed(6)},${c.lng.toFixed(6)}&z=${z}&output=embed`;
+  if (g.src !== src) g.src = src;
+}
+for (const b of document.querySelectorAll("#abas button")) b.addEventListener("click", () => {
+  const aba = b.dataset.aba;
+  document.querySelectorAll("#abas button").forEach(x => x.classList.toggle("ativa", x === b));
+  $("mapa").hidden = aba !== "mapa";
+  $("google").hidden = aba !== "google";
+  if (aba === "google") mostrarGoogle();
+  else mapa.invalidateSize();
+});
+
 document.addEventListener("areas-ponto", e => {
   try { pontoDaMoradas(JSON.parse(e.detail)); } catch (err) { console.error(err); }
 });
