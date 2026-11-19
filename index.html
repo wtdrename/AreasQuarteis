@@ -326,8 +326,16 @@ const quartelProposto = c => R.grelha.no[c] >= 0 ? R.melhorQ[R.grelha.no[c]] : -
 // ---------- mapa ----------
 
 const mapa = L.map("mapa", { preferCanvas: true }).setView([38.74, -9.15], 12);
-L.tileLayer("https://gisrsb.cm-lisboa.pt/arcgisrsb/rest/services/MapaBase_WGS84/MapServer/tile/{z}/{y}/{x}",
+const mapaBase = L.tileLayer("https://gisrsb.cm-lisboa.pt/arcgisrsb/rest/services/MapaBase_WGS84/MapServer/tile/{z}/{y}/{x}",
   { minZoom: 11, maxZoom: 20, maxNativeZoom: 20, attribution: "CM Lisboa · © OpenStreetMap" }).addTo(mapa);
+// Um quadrado que falha fica cinzento até se mudar o zoom (o Leaflet não o volta a pedir, nem ao arrastar o mapa):
+// pede-se outra vez, até 3 vezes, cada vez com mais espera (como na Moradas 112)
+mapaBase.on("tileerror", ({ tile, coords }) => {
+  const n = (Number(tile.dataset.tentativas) || 0) + 1;
+  if (n > 3) { console.warn("mapa: quadrado sem resposta depois de 3 tentativas", coords); return; }
+  tile.dataset.tentativas = n;
+  setTimeout(() => { if (tile.isConnected) tile.src = mapaBase.getTileUrl(coords) + "?tentativa=" + n; }, 700 * n);
+});
 const tela = L.canvas({ padding: 0.3 });
 let camadaGrelha = null, camadaRuas = null, camadaAtuais = null;
 const camadaQuarteis = L.layerGroup().addTo(mapa);
