@@ -40,6 +40,10 @@
   .popup tr:hover td { background: #f1f3f5; }
   .popup tr.visto td { font-weight: 600; }
   .popup .km { color: var(--suave); }
+  #tempos { background: #fff; padding: 8px 10px; border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,.35); font: 13px/1.4 system-ui, "Segoe UI", sans-serif; max-height: 60vh; overflow-y: auto; position: relative; }
+  #tempos[hidden] { display: none; }
+  #tempos .fechar { position: absolute; top: 2px; right: 4px; margin: 0; padding: 0 5px; border: 0; background: none; font-size: 17px; line-height: 1; color: var(--suave); }
+  #tempos .titulo, #tempos table { padding-right: 16px; }
   label.falta { color: #9aa3ad; cursor: default; }
   label.falta::after { content: " (faltam as áreas do goMAP)"; font-style: italic; }
   .titulo { font-weight: 600; margin-bottom: 4px; max-width: 320px; }
@@ -435,7 +439,22 @@ function desenharPercurso(q, no, destino, tracejado) {
   return m / 1000;
 }
 
-// tempos de cada quartel até ao ponto, num popup, e os percursos; titulo = morada que veio da Moradas 112
+// caixa fixa no canto inferior esquerdo do mapa com os tempos (não tapa o ponto) e marca do ponto escolhido
+const camadaPonto = L.layerGroup().addTo(mapa);
+const caixaTempos = L.DomUtil.create("div");
+caixaTempos.id = "tempos";
+caixaTempos.hidden = true;
+L.DomEvent.disableClickPropagation(caixaTempos);
+L.DomEvent.disableScrollPropagation(caixaTempos);
+new (L.Control.extend({ options: { position: "bottomleft" }, onAdd: () => caixaTempos }))().addTo(mapa);
+function fecharTempos() {
+  caixaTempos.hidden = true;
+  caixaTempos.replaceChildren();
+  camadaPercurso.clearLayers();
+  camadaPonto.clearLayers();
+}
+
+// tempos de cada quartel até ao ponto, na caixa do canto, e os percursos; titulo = morada que veio da Moradas 112
 function verPonto(latlng, titulo) {
   const { lat, lng } = latlng, no = pertoNoIndice(R.g, R.ind, lat, lng, 300);
   if (no < 0) return;
@@ -463,12 +482,17 @@ function verPonto(latlng, titulo) {
     });
   };
   for (const tr of caixa.querySelectorAll("tr")) tr.addEventListener("click", () => ver([Number(tr.dataset.q)]));
-  // primeiro o popup: abrir este fecha o anterior, e fechar apaga os percursos
-  L.popup().setLatLng(latlng).setContent(caixa).openOn(mapa);
+  // a caixa do canto substitui a do ponto anterior; o × fecha-a e apaga os percursos
+  const fechar = document.createElement("button");
+  fechar.type = "button"; fechar.className = "fechar"; fechar.title = "Fechar"; fechar.textContent = "×";
+  fechar.addEventListener("click", fecharTempos);
+  caixaTempos.replaceChildren(fechar, caixa);
+  caixaTempos.hidden = false;
+  camadaPonto.clearLayers();
+  L.circleMarker(latlng, { radius: 7, color: "#fff", weight: 3, fillColor: "#d32f2f", fillOpacity: 1, interactive: false }).addTo(camadaPonto);
   ver(atual >= 0 && atual !== maisRapido ? [maisRapido, atual] : [maisRapido]);
 }
 mapa.on("click", ev => R && verPonto(ev.latlng));
-mapa.on("popupclose", () => camadaPercurso.clearLayers());
 
 // ---------- ponto vindo da Moradas 112 (script exportar-areas.user.js) ----------
 
